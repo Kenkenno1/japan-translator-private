@@ -41,8 +41,8 @@
       --accent:#6ee7b7;
       --accentBg:rgba(110,231,183,0.10);
       --accentBd:rgba(110,231,183,0.30);
-      --twColor:#6ee7b7;
-      --jpColor:#f9a8d4;
+      --twTextColor:#86efac;
+      --jpTextColor:#93c5fd;
       --logBg:rgba(255,255,255,0.03);
       --summaryBg:rgba(255,255,255,0.04);
     }
@@ -73,6 +73,8 @@
       --accent:#059669;
       --accentBg:rgba(5,150,105,0.08);
       --accentBd:rgba(5,150,105,0.25);
+      --twTextColor:#166534;
+      --jpTextColor:#1e40af;
       --twColor:#059669;
       --jpColor:#db2777;
       --logBg:rgba(0,0,0,0.02);
@@ -190,11 +192,20 @@
     }
     .display .translated{
       font-size:22px;
-      font-weight:600;
+      font-weight:500;
       line-height:1.7;
-      color:var(--outColor);
       word-break:break-word;
       white-space:pre-wrap;
+    }
+    /* TW zone text: green tone */
+    #displayTw .translated{
+      color:var(--twTextColor);
+      font-family:"Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+    }
+    /* JP zone text: blue tone */
+    #displayJp .translated{
+      color:var(--jpTextColor);
+      font-family:"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Meiryo", system-ui, sans-serif;
     }
     .display .original{
       font-size:13px;
