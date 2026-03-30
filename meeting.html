@@ -1249,24 +1249,27 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         // Add to log
         addLogEntry(speaker, text, translated);
 
-        // TTS: show play button in listener's display for manual playback
-        // Store latest translation info for play buttons
-        const listenerPlayBtn = speaker === 'TW' ? el.btnPlayJp : el.btnPlayTw;
-        listenerPlayBtn._ttsText = translated;
-        listenerPlayBtn._ttsLang = tgtLang;
+        // TTS: store translation info on BOTH play buttons
+        el.btnPlayTw._ttsText = translated;
+        el.btnPlayTw._ttsLang = tgtLang;
+        el.btnPlayJp._ttsText = translated;
+        el.btnPlayJp._ttsLang = tgtLang;
 
         if (state.ttsOn && !controller.signal.aborted) {
           const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
           if (isMobile) {
-            // Mobile: show play button (iOS needs user gesture for audio)
-            listenerPlayBtn.style.display = '';
+            // Mobile: show play button on BOTH displays (user may only see their own side)
+            el.btnPlayTw.style.display = '';
+            el.btnPlayJp.style.display = '';
           } else {
-            // Desktop: auto play
+            // Desktop: auto play, no button needed
             speak(translated, tgtLang);
-            listenerPlayBtn.style.display = 'none';
+            el.btnPlayTw.style.display = 'none';
+            el.btnPlayJp.style.display = 'none';
           }
         } else {
-          listenerPlayBtn.style.display = 'none';
+          el.btnPlayTw.style.display = 'none';
+          el.btnPlayJp.style.display = 'none';
         }
 
       } catch (e) {
