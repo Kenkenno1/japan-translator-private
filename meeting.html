@@ -978,7 +978,26 @@
       const ttsAc = new AbortController();
       state.ttsController = ttsAc;
 
-      // Try OpenAI TTS first if API key exists
+      // 1) Browser TTS first (instant playback)
+      if ('speechSynthesis' in window) {
+        try {
+          speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = localLang;
+          const voices = speechSynthesis.getVoices();
+          const best = voices.find(v => v.lang === localLang && v.name.includes('Google'))
+                    || voices.find(v => v.lang === localLang)
+                    || voices.find(v => v.lang.startsWith(localLang.split('-')[0]));
+          if (best) u.voice = best;
+          u.onend = onDone;
+          u.onerror = onDone;
+          speechSynthesis.speak(u);
+          state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dynamicTimeout * 3);
+          return;
+        } catch {}
+      }
+
+      // 2) Fallback: OpenAI TTS if browser TTS unavailable
       if (state.apiKey) {
         try {
           const res = await fetch(CONFIG.TTS_BASE, {
@@ -1007,25 +1026,6 @@
         } catch (e) {
           if (ttsAc.signal.aborted) return;
         }
-      }
-
-      // Fallback: browser TTS
-      if ('speechSynthesis' in window) {
-        try {
-          speechSynthesis.cancel();
-          const u = new SpeechSynthesisUtterance(text);
-          u.lang = localLang;
-          const voices = speechSynthesis.getVoices();
-          const best = voices.find(v => v.lang === localLang && v.name.includes('Google'))
-                    || voices.find(v => v.lang === localLang)
-                    || voices.find(v => v.lang.startsWith(localLang.split('-')[0]));
-          if (best) u.voice = best;
-          u.onend = onDone;
-          u.onerror = onDone;
-          speechSynthesis.speak(u);
-          state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dynamicTimeout * 3);
-          return;
-        } catch {}
       }
       onDone();
     }
