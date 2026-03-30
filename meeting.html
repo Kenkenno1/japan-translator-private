@@ -1190,19 +1190,15 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.placeholderTw.style.display = 'none';
 
       if (speaker === 'TW') {
-        // TW spoke Chinese → TW zone: Chinese large, Japanese pending
+        // TW spoke Chinese → TW zone: Chinese large only
         el.translatedTw.textContent = text;
-        el.originalTw.textContent = '';
-        // JP zone: loading Japanese translation, Chinese reference small
+        // JP zone: loading Japanese translation
         el.translatedJp.textContent = '';
-        el.originalJp.textContent = text;
       } else {
-        // JP spoke Japanese → JP zone: Japanese large, Chinese pending
+        // JP spoke Japanese → JP zone: Japanese large only
         el.translatedJp.textContent = text;
-        el.originalJp.textContent = '';
-        // TW zone: loading Chinese translation, Japanese reference small
+        // TW zone: loading Chinese translation
         el.translatedTw.textContent = '';
-        el.originalTw.textContent = text;
       }
 
       listenerDisplayEl.classList.add('loading');
@@ -1218,13 +1214,9 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         listenerDisplayEl.classList.remove('loading');
 
         if (speaker === 'TW') {
-          // translated = Japanese → JP large, TW small
           el.translatedJp.textContent = translated;
-          el.originalTw.textContent = translated;
         } else {
-          // translated = Chinese → TW large, JP small
           el.translatedTw.textContent = translated;
-          el.originalJp.textContent = translated;
         }
 
         // Step 2: Refine
@@ -1235,10 +1227,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
             translated = refined;
             if (speaker === 'TW') {
               el.translatedJp.textContent = translated;
-              el.originalTw.textContent = translated;
             } else {
               el.translatedTw.textContent = translated;
-              el.originalJp.textContent = translated;
             }
           }
         } catch (e) {
