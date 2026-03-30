@@ -894,10 +894,83 @@
     });
     updateTtsBtn();
 
-    // ========== Play buttons (mobile manual TTS) ==========
-    function handlePlayBtn(btn) {
+    // ========== Play buttons (manual TTS — OpenAI HD priority) ==========
+    async function handlePlayBtn(btn) {
       if (!btn._ttsText || !btn._ttsLang) return;
-      speak(btn._ttsText, btn._ttsLang);
+      if (state.speaking) stopSpeaking();
+
+      const text = btn._ttsText;
+      const lang = btn._ttsLang;
+      const localLang = LANG[lang].ttsLocal;
+      const gen = ++state.speakGeneration;
+      state.speaking = true;
+
+      const display = lang === 'zh-TW' ? el.displayJp : el.displayTw;
+      display.classList.add('speaking-glow');
+      btn.textContent = '⏹ 播放中…';
+
+      const onDone = () => {
+        if (gen !== state.speakGeneration) return;
+        if (state.ttsTimeout) { clearTimeout(state.ttsTimeout); state.ttsTimeout = null; }
+        display.classList.remove('speaking-glow');
+        state.speaking = false;
+        state.audioEl = null;
+        state.lastTtsEndedAt = Date.now();
+        btn.textContent = '🔊 播放翻譯';
+      };
+
+      const charMs = /[\u3040-\u9fff]/.test(text) ? 120 : 80;
+      const dynamicTimeout = Math.max(CONFIG.TTS_TIMEOUT_MIN_MS, text.length * charMs);
+      const ttsAc = new AbortController();
+      state.ttsController = ttsAc;
+
+      // User tapped → try OpenAI HD first (better quality)
+      if (state.apiKey) {
+        try {
+          const res = await fetch(CONFIG.TTS_BASE, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+            body: JSON.stringify({ model: 'tts-1', input: text, voice: CONFIG.TTS_VOICE, response_format: 'mp3' }),
+            signal: ttsAc.signal,
+          });
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            const chunks = [];
+            for (let i = 0; i < bytes.length; i += 8192) chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
+            const audio = new Audio(`data:audio/mp3;base64,${btoa(chunks.join(''))}`);
+            state.audioEl = audio;
+            audio.onended = onDone;
+            audio.onerror = onDone;
+            await audio.play();
+            const dur = isFinite(audio.duration) ? audio.duration * 1000 : dynamicTimeout;
+            state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dur + 5000);
+            return;
+          }
+        } catch (e) {
+          if (ttsAc.signal.aborted) return;
+        }
+      }
+
+      // Fallback: browser TTS
+      if ('speechSynthesis' in window) {
+        try {
+          speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = localLang;
+          const voices = speechSynthesis.getVoices();
+          const best = voices.find(v => v.lang === localLang && v.name.includes('Google'))
+                    || voices.find(v => v.lang === localLang)
+                    || voices.find(v => v.lang.startsWith(localLang.split('-')[0]));
+          if (best) u.voice = best;
+          u.onend = onDone;
+          u.onerror = onDone;
+          speechSynthesis.speak(u);
+          state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dynamicTimeout * 3);
+          return;
+        } catch {}
+      }
+      onDone();
     }
     el.btnPlayTw.addEventListener('click', () => handlePlayBtn(el.btnPlayTw));
     el.btnPlayJp.addEventListener('click', () => handlePlayBtn(el.btnPlayJp));
@@ -1390,7 +1463,6 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       const btn = speaker === 'TW' ? el.btnMicTw : el.btnMicJp;
       const otherBtn = speaker === 'TW' ? el.btnMicJp : el.btnMicTw;
       const display = speaker === 'TW' ? el.displayTw : el.displayJp;
-      const originalEl = speaker === 'TW' ? el.originalTw : el.originalJp;
       const translatedEl = speaker === 'TW' ? el.translatedTw : el.translatedJp;
       const placeholderEl = speaker === 'TW' ? el.placeholderTw : el.placeholderJp;
 
@@ -1403,8 +1475,10 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         display.classList.add('recording-active');
         // Clear previous content for this speaker
         placeholderEl.style.display = 'none';
-        originalEl.textContent = '';
         translatedEl.textContent = '';
+        // Hide play buttons during recording
+        el.btnPlayTw.style.display = 'none';
+        el.btnPlayJp.style.display = 'none';
       }
 
       recognition.onstart = () => {
@@ -1427,7 +1501,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
           if (event.results[i].isFinal) finalTranscript += t;
           else interim += t;
         }
-        originalEl.textContent = finalTranscript + interim;
+        translatedEl.textContent = finalTranscript + interim;
       };
 
       recognition.onerror = (event) => {
