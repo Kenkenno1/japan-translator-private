@@ -296,40 +296,7 @@
       flex-shrink:0;
     }
 
-    /* ===== Conversation log ===== */
-    .log-toggle{
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      gap:6px;
-      padding:6px;
-      font-size:12px;
-      color:var(--muted);
-      cursor:pointer;
-      border:none;
-      background:none;
-      width:100%;
-      font-family:inherit;
-      -webkit-user-select:none;
-      user-select:none;
-    }
-    .log-toggle:hover{opacity:0.8}
-    .log-toggle .arrow{
-      transition:transform 200ms;
-      font-size:10px;
-    }
-    .log-toggle.open .arrow{transform:rotate(180deg)}
-
-    .log-wrap{
-      max-height:0;
-      overflow:hidden;
-      transition:max-height 300ms ease;
-      flex-shrink:0;
-    }
-    .log-wrap.open{
-      max-height:30vh;
-      overflow:auto;
-    }
+    /* ===== Conversation log (inside overlay) ===== */
     .log-list{
       display:flex;
       flex-direction:column;
@@ -603,6 +570,26 @@
     .toast-item.out{opacity:0;transform:translateY(8px)}
     .toast-item.toast-error{border-color:var(--dangerBd);background:var(--dangerBg);color:var(--danger)}
 
+    /* ===== Summary section inside log overlay ===== */
+    .log-count-header{
+      font-size:13px;
+      color:var(--muted);
+      opacity:0.6;
+      margin-left:6px;
+    }
+    .summary-section{
+      margin-top:16px;
+      padding-top:16px;
+      border-top:1px solid var(--border);
+    }
+    .summary-divider{
+      text-align:center;
+      font-size:12px;
+      color:var(--muted);
+      opacity:0.5;
+      margin-bottom:12px;
+    }
+
     /* ===== Play button inside display ===== */
     .btn-play{
       margin-top:auto;
@@ -662,19 +649,27 @@
     </div>
   </div>
 
-  <!-- Summary overlay -->
+  <!-- Log & Summary overlay -->
   <div class="overlay" id="summaryOverlay" aria-hidden="true">
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <div class="modal-title">對話摘要</div>
+        <div class="modal-title">對話紀錄</div>
+        <span class="log-count-header" id="logCount">(0)</span>
+        <span style="flex:1"></span>
         <button class="modal-close" id="btnCloseSummary">關閉</button>
       </div>
-      <div class="modal-body">
-        <div class="summary-content" id="summaryContent"></div>
+      <div class="modal-body" id="logBody">
+        <div class="log-list" id="logList">
+          <div class="log-empty" id="logEmpty">尚無對話紀錄</div>
+        </div>
+        <div class="summary-section" id="summarySection" style="display:none">
+          <div class="summary-divider">── 會議摘要 ──</div>
+          <div class="summary-content" id="summaryContent"></div>
+        </div>
       </div>
       <div class="modal-footer">
-        <button class="btn-summary-gen" id="btnGenSummary">產生摘要</button>
-        <button class="btn-summary-copy" id="btnCopySummary">複製</button>
+        <button class="btn-summary-gen" id="btnGenSummary">📋 產生摘要</button>
+        <button class="btn-summary-copy" id="btnCopySummary">複製摘要</button>
       </div>
     </div>
   </div>
@@ -701,18 +696,6 @@
       <button class="btn-mic" id="btnMicJp">JP 發言</button>
     </div>
 
-    <!-- Divider + Log -->
-    <div class="divider"></div>
-    <button class="log-toggle" id="logToggle">
-      <span>對話紀錄</span>
-      <span class="arrow">▼</span>
-      <span class="log-count" id="logCount">(0)</span>
-    </button>
-    <div class="log-wrap" id="logWrap">
-      <div class="log-list" id="logList">
-        <div class="log-empty" id="logEmpty">尚無對話紀錄</div>
-      </div>
-    </div>
     <div class="divider"></div>
 
     <!-- ===== TW Zone ===== -->
@@ -731,7 +714,7 @@
     <div class="toolbar">
       <button class="tool-btn" id="btnTtsToggle" title="朗讀開關">🔊 朗讀：開</button>
       <span class="spacer"></span>
-      <button class="tool-btn" id="btnSummary" title="對話摘要">📋 摘要</button>
+      <button class="tool-btn" id="btnSummary" title="對話紀錄與摘要">📋 紀錄</button>
       <button class="tool-btn" id="btnClearAll" title="清除全部">🗑 清除</button>
     </div>
   </div>
@@ -840,8 +823,6 @@
       btnPlayTw: $('btnPlayTw'),
       btnPlayJp: $('btnPlayJp'),
       // Log
-      logToggle: $('logToggle'),
-      logWrap: $('logWrap'),
       logList: $('logList'),
       logCount: $('logCount'),
       logEmpty: $('logEmpty'),
@@ -1327,21 +1308,14 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       div.innerHTML = `<div class="log-speaker ${entry.speaker.toLowerCase()}">${entry.speaker} ${entry.time}</div><div class="log-original">${escHtml(entry.original)}</div><div class="log-translated">→ ${escHtml(entry.translated)}</div>`;
       el.logList.appendChild(div);
 
-      // Auto scroll
-      if (el.logWrap.classList.contains('open')) {
-        el.logWrap.scrollTop = el.logWrap.scrollHeight;
+      // Auto scroll log body if overlay is open
+      const logBody = $('logBody');
+      if (el.summaryOverlay.classList.contains('show') && logBody) {
+        logBody.scrollTop = logBody.scrollHeight;
       }
     }
 
     function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-    el.logToggle.addEventListener('click', () => {
-      el.logWrap.classList.toggle('open');
-      el.logToggle.classList.toggle('open');
-      if (el.logWrap.classList.contains('open')) {
-        el.logWrap.scrollTop = el.logWrap.scrollHeight;
-      }
-    });
 
     // ========== Speech Recognition ==========
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1532,6 +1506,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.btnPlayTw.style.display = 'none';
       el.btnPlayJp.style.display = 'none';
       el.summaryContent.textContent = '';
+      $('summarySection').style.display = 'none';
       toast('已清除所有紀錄');
     });
 
@@ -1611,11 +1586,15 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
           break;
         }
         el.summaryContent.textContent = result || '（無法產生摘要）';
+        $('summarySection').style.display = '';
+        // Scroll to summary
+        const logBody = $('logBody');
+        if (logBody) logBody.scrollTop = logBody.scrollHeight;
       } catch (e) {
         toastError('摘要產生失敗：' + (e?.message || e));
       } finally {
         el.btnGenSummary.disabled = false;
-        el.btnGenSummary.textContent = '產生摘要';
+        el.btnGenSummary.textContent = '📋 產生摘要';
       }
     });
 
