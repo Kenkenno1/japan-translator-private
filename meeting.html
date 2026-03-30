@@ -603,6 +603,36 @@
     .toast-item.out{opacity:0;transform:translateY(8px)}
     .toast-item.toast-error{border-color:var(--dangerBd);background:var(--dangerBg);color:var(--danger)}
 
+    /* ===== Play button inside display ===== */
+    .btn-play{
+      margin-top:auto;
+      padding:10px 16px;
+      border:1px solid var(--accentBd);
+      border-radius:12px;
+      background:var(--accentBg);
+      color:var(--accent);
+      font-size:14px;
+      font-weight:600;
+      font-family:inherit;
+      cursor:pointer;
+      -webkit-user-select:none;
+      user-select:none;
+      flex-shrink:0;
+      text-align:center;
+      transition:opacity 150ms;
+    }
+    .btn-play:active{opacity:0.7}
+
+    /* ===== Status text (standalone, no zone-label wrapper) ===== */
+    .status-text{
+      font-size:11px;
+      color:var(--muted);
+      opacity:0.7;
+      padding:0 4px;
+      flex-shrink:0;
+      min-height:14px;
+    }
+
     @media (prefers-reduced-motion: reduce){
       .btn-mic.recording,.btn-mic.mic-pending,.display.recording-active{animation:none}
       .display.loading .translated::before{animation:none;opacity:0.5}
@@ -661,19 +691,14 @@
     <!-- ===== JP Zone (rotated 180°) ===== -->
     <!-- HTML order is same as TW zone; rotate(180°) mirrors it for JP reader -->
     <div class="zone zone-jp" id="zoneJp">
-      <div class="zone-label">
-        <span class="tag tag-jp">JP</span>
-        <span class="status-text" id="statusJp"></span>
-      </div>
+      <span class="status-text" id="statusJp"></span>
       <div class="display" id="displayJp">
         <div class="translated" id="translatedJp"></div>
         <div class="original" id="originalJp"></div>
         <div class="placeholder" id="placeholderJp">等待 JP 發言…</div>
+        <button class="btn-play" id="btnPlayJp" style="display:none">🔊 播放翻譯</button>
       </div>
-      <button class="btn-mic" id="btnMicJp">
-        <span class="mic-icon">🎤</span>
-        <span class="mic-label">JP 發言</span>
-      </button>
+      <button class="btn-mic" id="btnMicJp">JP 發言</button>
     </div>
 
     <!-- Divider + Log -->
@@ -692,19 +717,14 @@
 
     <!-- ===== TW Zone ===== -->
     <div class="zone" id="zoneTw">
-      <div class="zone-label">
-        <span class="tag tag-tw">TW</span>
-        <span class="status-text" id="statusTw"></span>
-      </div>
+      <span class="status-text" id="statusTw"></span>
       <div class="display" id="displayTw">
         <div class="placeholder" id="placeholderTw">等待 TW 發言…</div>
         <div class="original" id="originalTw"></div>
         <div class="translated" id="translatedTw"></div>
+        <button class="btn-play" id="btnPlayTw" style="display:none">🔊 播放翻譯</button>
       </div>
-      <button class="btn-mic" id="btnMicTw">
-        <span class="mic-icon">🎤</span>
-        <span class="mic-label">TW 發言</span>
-      </button>
+      <button class="btn-mic" id="btnMicTw">TW 發言</button>
     </div>
 
     <!-- Bottom toolbar -->
@@ -817,6 +837,8 @@
       placeholderJp: $('placeholderJp'),
       statusTw: $('statusTw'),
       statusJp: $('statusJp'),
+      btnPlayTw: $('btnPlayTw'),
+      btnPlayJp: $('btnPlayJp'),
       // Log
       logToggle: $('logToggle'),
       logWrap: $('logWrap'),
@@ -879,6 +901,14 @@
       toast(state.ttsOn ? '朗讀已開啟' : '朗讀已關閉');
     });
     updateTtsBtn();
+
+    // ========== Play buttons (mobile manual TTS) ==========
+    function handlePlayBtn(btn) {
+      if (!btn._ttsText || !btn._ttsLang) return;
+      speak(btn._ttsText, btn._ttsLang);
+    }
+    el.btnPlayTw.addEventListener('click', () => handlePlayBtn(el.btnPlayTw));
+    el.btnPlayJp.addEventListener('click', () => handlePlayBtn(el.btnPlayJp));
 
     // ========== Settings ==========
     el.btnSettings.addEventListener('click', () => openSettings(true));
@@ -1238,12 +1268,24 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         // Add to log
         addLogEntry(speaker, text, translated);
 
-        // Auto TTS (speak translation to the other party)
+        // TTS: show play button in listener's display for manual playback
+        // Store latest translation info for play buttons
+        const listenerPlayBtn = speaker === 'TW' ? el.btnPlayJp : el.btnPlayTw;
+        listenerPlayBtn._ttsText = translated;
+        listenerPlayBtn._ttsLang = tgtLang;
+
         if (state.ttsOn && !controller.signal.aborted) {
-          const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-          if (!isMobile) {
+          const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+          if (isMobile) {
+            // Mobile: show play button (iOS needs user gesture for audio)
+            listenerPlayBtn.style.display = '';
+          } else {
+            // Desktop: auto play
             speak(translated, tgtLang);
+            listenerPlayBtn.style.display = 'none';
           }
+        } else {
+          listenerPlayBtn.style.display = 'none';
         }
 
       } catch (e) {
@@ -1349,8 +1391,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         // Show pending immediately
         const btn = speaker === 'TW' ? el.btnMicTw : el.btnMicJp;
         btn.classList.add('mic-pending');
-        btn.querySelector('.mic-label').textContent = '等待中…';
-        btn.querySelector('.mic-icon').textContent = '⏳';
+        btn.textContent = '⏳ 等待中…';
         return;
       }
       startMicCore(speaker);
@@ -1380,8 +1421,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         btn.classList.remove('mic-pending');
         btn.classList.add('recording');
         otherBtn.classList.remove('recording', 'mic-pending');
-        btn.querySelector('.mic-icon').textContent = '⏹';
-        btn.querySelector('.mic-label').textContent = '停止';
+        btn.textContent = '⏹ 停止';
         display.classList.add('recording-active');
         // Clear previous content for this speaker
         placeholderEl.style.display = 'none';
@@ -1451,8 +1491,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       }, 5000);
 
       btn.classList.add('mic-pending');
-      btn.querySelector('.mic-icon').textContent = '⏹';
-      btn.querySelector('.mic-label').textContent = '等待中…';
+      btn.textContent = '⏳ 等待中…';
     }
 
     function stopMic() {
@@ -1465,10 +1504,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       }
       el.btnMicTw.classList.remove('recording', 'mic-pending');
       el.btnMicJp.classList.remove('recording', 'mic-pending');
-      el.btnMicTw.querySelector('.mic-icon').textContent = '🎤';
-      el.btnMicJp.querySelector('.mic-icon').textContent = '🎤';
-      el.btnMicTw.querySelector('.mic-label').textContent = 'TW 發言';
-      el.btnMicJp.querySelector('.mic-label').textContent = 'JP 發言';
+      el.btnMicTw.textContent = 'TW 發言';
+      el.btnMicJp.textContent = 'JP 發言';
       el.displayTw.classList.remove('recording-active');
       el.displayJp.classList.remove('recording-active');
       activeMicSpeaker = null;
@@ -1492,6 +1529,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.placeholderJp.style.display = '';
       el.statusTw.textContent = '';
       el.statusJp.textContent = '';
+      el.btnPlayTw.style.display = 'none';
+      el.btnPlayJp.style.display = 'none';
       el.summaryContent.textContent = '';
       toast('已清除所有紀錄');
     });
