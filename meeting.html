@@ -620,6 +620,11 @@
       transition:opacity 150ms;
     }
     .btn-play:active{opacity:0.7}
+    .btn-play.playing{
+      border-color:var(--dangerBd);
+      background:var(--dangerBg);
+      color:var(--danger);
+    }
 
     /* ===== Status text (standalone, no zone-label wrapper) ===== */
     .status-text{
@@ -895,9 +900,28 @@
     updateTtsBtn();
 
     // ========== Play buttons (manual TTS — OpenAI HD priority) ==========
+    function setPlayBtnsStop() {
+      el.btnPlayTw.textContent = '⏹ 停止播放';
+      el.btnPlayJp.textContent = '⏹ 停止播放';
+      el.btnPlayTw.classList.add('playing');
+      el.btnPlayJp.classList.add('playing');
+    }
+    function setPlayBtnsReady() {
+      el.btnPlayTw.textContent = '🔊 播放翻譯';
+      el.btnPlayJp.textContent = '🔊 播放翻譯';
+      el.btnPlayTw.classList.remove('playing');
+      el.btnPlayJp.classList.remove('playing');
+    }
+
     async function handlePlayBtn(btn) {
       if (!btn._ttsText || !btn._ttsLang) return;
-      if (state.speaking) stopSpeaking();
+
+      // If already playing, stop
+      if (state.speaking) {
+        stopSpeaking();
+        setPlayBtnsReady();
+        return;
+      }
 
       const text = btn._ttsText;
       const lang = btn._ttsLang;
@@ -907,7 +931,8 @@
 
       const display = lang === 'zh-TW' ? el.displayJp : el.displayTw;
       display.classList.add('speaking-glow');
-      btn.textContent = '⏹ 播放中…';
+      // Both buttons become stop buttons immediately
+      setPlayBtnsStop();
 
       const onDone = () => {
         if (gen !== state.speakGeneration) return;
@@ -916,7 +941,7 @@
         state.speaking = false;
         state.audioEl = null;
         state.lastTtsEndedAt = Date.now();
-        btn.textContent = '🔊 播放翻譯';
+        setPlayBtnsReady();
       };
 
       const charMs = /[\u3040-\u9fff]/.test(text) ? 120 : 80;
@@ -1126,6 +1151,7 @@
       el.displayJp.classList.remove('speaking-glow');
       state.speaking = false;
       state.lastTtsEndedAt = Date.now();
+      setPlayBtnsReady();
     }
 
     // ========== Translation ==========
