@@ -185,15 +185,16 @@
       background:linear-gradient(180deg, var(--panel), var(--panel2));
       border:1px solid var(--border);
       overflow:auto;
-      padding:10px 14px;
+      padding:14px 18px;
       display:flex;
       flex-direction:column;
-      gap:4px;
+      gap:8px;
     }
     .display .translated{
-      font-size:22px;
-      font-weight:500;
-      line-height:1.7;
+      font-size:28px;
+      font-weight:600;
+      line-height:1.6;
+      letter-spacing:0.01em;
       word-break:break-word;
       white-space:pre-wrap;
     }
@@ -208,9 +209,10 @@
       font-family:"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Meiryo", system-ui, sans-serif;
     }
     .display .original{
-      font-size:13px;
+      font-size:15px;
       color:var(--muted);
-      opacity:0.7;
+      opacity:0.8;
+      line-height:1.6;
       word-break:break-word;
       white-space:pre-wrap;
     }
@@ -218,7 +220,7 @@
       color:var(--muted);
       opacity:0.3;
       font-style:italic;
-      font-size:15px;
+      font-size:18px;
     }
 
     /* Loading skeleton */
@@ -226,10 +228,10 @@
     .display.loading .translated::before{
       content:"";
       display:block;
-      height:28px;
+      height:34px;
       width:70%;
       background:var(--skelBar);
-      border-radius:4px;
+      border-radius:6px;
       animation:skeleton-pulse 1.5s ease-in-out infinite;
     }
 
@@ -636,6 +638,34 @@
       min-height:14px;
     }
 
+    /* ===== Editable translated text ===== */
+    .translated[contenteditable="true"]{
+      cursor:text;
+      outline:none;
+      border-radius:8px;
+      padding:4px 6px;
+      margin:-4px -6px;
+      transition:background 150ms;
+    }
+    .translated[contenteditable="true"]:focus{
+      background:rgba(128,128,128,0.08);
+    }
+    .translated[contenteditable="true"]:empty::before{
+      content:"點此輸入文字…";
+      color:var(--muted);
+      opacity:0.4;
+      font-style:italic;
+      font-size:20px;
+      pointer-events:none;
+    }
+
+    /* Translate mode button */
+    .btn-mic.translate-mode{
+      border-color:var(--accentBd);
+      background:linear-gradient(135deg,rgba(110,231,183,0.20) 0%,rgba(110,231,183,0.10) 100%);
+      color:var(--accent);
+    }
+
     @media (prefers-reduced-motion: reduce){
       .btn-mic.recording,.btn-mic.mic-pending,.display.recording-active{animation:none}
       .display.loading .translated::before{animation:none;opacity:0.5}
@@ -810,6 +840,9 @@
       lastMicEndedAt: 0,
       // Conversation log: [{speaker:'TW'|'JP', original, translated, time}]
       log: [],
+      // Edit mode
+      editModeTw: false,
+      editModeJp: false,
     };
 
     // ========== DOM ==========
@@ -1281,6 +1314,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       if (!text?.trim()) return;
       if (!state.apiKey) { toastError('請先點右上角 ⚙ 輸入 API Key'); return; }
 
+      // Lock editing during translation
+      setEditable(false);
       stopSpeaking();
 
       const srcLang = speaker === 'TW' ? 'zh-TW' : 'ja';
@@ -1374,7 +1409,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
 
       } catch (e) {
         if (isAbortError(e)) return;
-        displayEl.classList.remove('loading');
+        listenerDisplayEl.classList.remove('loading');
         statusEl.textContent = '';
         toastError(String(e?.message || e));
       } finally {
@@ -1382,6 +1417,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
           state.busy = false;
           state.controller = null;
         }
+        // Re-enable editing after translation completes
+        setEditable(true);
       }
     }
 
@@ -1420,6 +1457,74 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
 
     function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+    // ========== Editable Text ==========
+    function setEditable(enabled) {
+      const val = enabled ? 'true' : 'false';
+      el.translatedTw.setAttribute('contenteditable', val);
+      el.translatedJp.setAttribute('contenteditable', val);
+      if (!enabled) {
+        // Exit edit mode when locked
+        exitEditMode('TW');
+        exitEditMode('JP');
+      }
+    }
+
+    function enterEditMode(speaker) {
+      if (speaker === 'TW' && !state.editModeTw) {
+        state.editModeTw = true;
+        el.btnMicTw.classList.add('translate-mode');
+        el.btnMicTw.textContent = '翻譯';
+      } else if (speaker === 'JP' && !state.editModeJp) {
+        state.editModeJp = true;
+        el.btnMicJp.classList.add('translate-mode');
+        el.btnMicJp.textContent = '翻譯';
+      }
+    }
+
+    function exitEditMode(speaker) {
+      if (speaker === 'TW' && state.editModeTw) {
+        state.editModeTw = false;
+        el.btnMicTw.classList.remove('translate-mode');
+        el.btnMicTw.textContent = 'TW 發言';
+      } else if (speaker === 'JP' && state.editModeJp) {
+        state.editModeJp = false;
+        el.btnMicJp.classList.remove('translate-mode');
+        el.btnMicJp.textContent = 'JP 發言';
+      }
+    }
+
+    function handleEditTranslate(speaker) {
+      const textEl = speaker === 'TW' ? el.translatedTw : el.translatedJp;
+      const text = (textEl.textContent || '').trim();
+      if (!text) {
+        toast('請先輸入文字');
+        return;
+      }
+      // Lock editing and run translation
+      setEditable(false);
+      handleUtterance(speaker, text);
+    }
+
+    // Listen for input events on translated divs
+    el.translatedTw.addEventListener('input', () => {
+      if (!activeRecognition && !state.busy) enterEditMode('TW');
+    });
+    el.translatedJp.addEventListener('input', () => {
+      if (!activeRecognition && !state.busy) enterEditMode('JP');
+    });
+
+    // Also detect focus to show placeholder hint
+    el.translatedTw.addEventListener('focus', () => {
+      if (!activeRecognition && !state.busy) {
+        el.placeholderTw.style.display = 'none';
+      }
+    });
+    el.translatedJp.addEventListener('focus', () => {
+      if (!activeRecognition && !state.busy) {
+        el.placeholderJp.style.display = 'none';
+      }
+    });
+
     // ========== Speech Recognition ==========
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let activeRecognition = null;
@@ -1439,6 +1544,12 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
     el.btnMicJp.addEventListener('click', () => toggleMic('JP'));
 
     function toggleMic(speaker) {
+      // If in edit/translate mode, trigger translation instead of mic
+      if ((speaker === 'TW' && state.editModeTw) || (speaker === 'JP' && state.editModeJp)) {
+        handleEditTranslate(speaker);
+        return;
+      }
+
       if (_micDelayTimer) { clearTimeout(_micDelayTimer); _micDelayTimer = null; }
 
       if (activeRecognition && activeMicSpeaker === speaker) {
@@ -1475,6 +1586,9 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
     }
 
     function startMicCore(speaker) {
+      // Lock editing during recording
+      setEditable(false);
+
       const lang = speaker === 'TW' ? 'zh-TW' : 'ja';
       const recognition = new SpeechRecognition();
       recognition.lang = LANG[lang].recogLang;
@@ -1611,6 +1725,9 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.btnPlayJp.style.display = 'none';
       el.summaryContent.textContent = '';
       $('summarySection').style.display = 'none';
+      exitEditMode('TW');
+      exitEditMode('JP');
+      setEditable(true);
       toast('已清除所有紀錄');
     });
 
@@ -1725,6 +1842,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
     (function init() {
       el.btnVerify.disabled = !state.apiKey;
       if (!state.apiKey) setTimeout(() => openSettings(true), 400);
+      // Enable editing on translated divs
+      setEditable(true);
     })();
   </script>
 </body>
