@@ -12,7 +12,7 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Noto+Sans+TC:wght@400;600&family=Noto+Sans+JP:wght@400;600&display=swap" rel="stylesheet">
 
   <style>
     /* ===== Dark theme (default) ===== */
@@ -43,6 +43,8 @@
       --accentBd:rgba(110,231,183,0.30);
       --twTextColor:#86efac;
       --jpTextColor:#93c5fd;
+      --twColor:#34d399;
+      --jpColor:#f472b6;
       --logBg:rgba(255,255,255,0.03);
       --summaryBg:rgba(255,255,255,0.04);
     }
@@ -780,6 +782,9 @@
       TOAST_COOLDOWN_MS: 800,
       STREAM_READ_TIMEOUT_MS: 30000,
       MIC_COOLDOWN_MS: 800,
+      MAX_RECORDING_MS: 120000,
+      MAX_LOG_ENTRIES: 200,
+      SUMMARY_TIMEOUT_MS: 45000,
     };
 
     const STORAGE_KEYS = {
@@ -816,7 +821,28 @@
     function lsGet(k, fb) { try { return localStorage.getItem(k) ?? fb; } catch { return fb; } }
     function lsSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
     function isAbortError(e) { return e && (e.name === 'AbortError' || e.code === 20); }
+    function makeAbortError() {
+      try { return new DOMException('Aborted', 'AbortError'); }
+      catch {
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        return err;
+      }
+    }
     async function safeReadText(res) { try { return await res.text(); } catch { return ''; } }
+    async function readStreamChunk(reader, timeoutMs) {
+      let timeoutId = null;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise((_, rej) => {
+            timeoutId = setTimeout(() => rej(new Error('Stream timeout')), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+    }
     function isInvalidModelError(status, body) {
       const t = (body || '').toLowerCase();
       return status === 404 || /invalid_model|model.*not found|no such model|unknown model/.test(t);
@@ -833,6 +859,7 @@
       speakGeneration: 0,
       speaking: false,
       audioEl: null,
+      audioUrl: null,
       ttsTimeout: null,
       ttsController: null,
       // Mic
@@ -840,6 +867,8 @@
       lastMicEndedAt: 0,
       // Conversation log: [{speaker:'TW'|'JP', original, translated, time}]
       log: [],
+      summaryController: null,
+      summaryRequestId: 0,
       // Edit mode
       editModeTw: false,
       editModeJp: false,
@@ -908,6 +937,55 @@
     }
     function toastError(msg) { toast(msg, 'error', 5000); }
 
+    function clearTranslationUi() {
+      el.displayTw.classList.remove('loading');
+      el.displayJp.classList.remove('loading');
+      el.statusTw.textContent = '';
+      el.statusJp.textContent = '';
+    }
+
+    // Keep both audience panels synchronized: each side sees its own language large
+    // and the counterpart language as supporting text.
+    function syncConversationPanels(speaker, sourceText, translatedText) {
+      const source = sourceText || '';
+      const translated = translatedText || '';
+      if (speaker === 'TW') {
+        el.translatedTw.textContent = source;
+        el.originalTw.textContent = translated;
+        el.originalJp.textContent = source;
+        el.translatedJp.textContent = translated;
+      } else {
+        el.translatedJp.textContent = source;
+        el.originalJp.textContent = translated;
+        el.originalTw.textContent = source;
+        el.translatedTw.textContent = translated;
+      }
+    }
+
+    function getDisplayForLang(lang) {
+      return lang === 'zh-TW' ? el.displayTw : el.displayJp;
+    }
+
+    function clearAudioObjectUrl() {
+      if (state.audioUrl) {
+        URL.revokeObjectURL(state.audioUrl);
+        state.audioUrl = null;
+      }
+    }
+
+    function createAudioFromBuffer(buf) {
+      clearAudioObjectUrl();
+      state.audioUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/mpeg' }));
+      return new Audio(state.audioUrl);
+    }
+
+    function abortSummary() {
+      if (state.summaryController) {
+        try { state.summaryController.abort(); } catch {}
+        state.summaryController = null;
+      }
+    }
+
     // ========== Theme ==========
     function applyTheme(t) {
       state.theme = t;
@@ -962,7 +1040,7 @@
       const gen = ++state.speakGeneration;
       state.speaking = true;
 
-      const display = lang === 'zh-TW' ? el.displayJp : el.displayTw;
+      const display = getDisplayForLang(lang);
       display.classList.add('speaking-glow');
       // Both buttons become stop buttons immediately
       setPlayBtnsStop();
@@ -973,6 +1051,8 @@
         display.classList.remove('speaking-glow');
         state.speaking = false;
         state.audioEl = null;
+        state.ttsController = null;
+        clearAudioObjectUrl();
         state.lastTtsEndedAt = Date.now();
         setPlayBtnsReady();
       };
@@ -993,10 +1073,7 @@
           });
           if (res.ok) {
             const buf = await res.arrayBuffer();
-            const bytes = new Uint8Array(buf);
-            const chunks = [];
-            for (let i = 0; i < bytes.length; i += 8192) chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
-            const audio = new Audio(`data:audio/mp3;base64,${btoa(chunks.join(''))}`);
+            const audio = createAudioFromBuffer(buf);
             state.audioEl = audio;
             audio.onended = onDone;
             audio.onerror = onDone;
@@ -1016,11 +1093,7 @@
           speechSynthesis.cancel();
           const u = new SpeechSynthesisUtterance(text);
           u.lang = localLang;
-          const voices = speechSynthesis.getVoices();
-          const best = voices.find(v => v.lang === localLang && v.name.includes('Google'))
-                    || voices.find(v => v.lang === localLang)
-                    || voices.find(v => v.lang.startsWith(localLang.split('-')[0]));
-          if (best) u.voice = best;
+          if (voiceCache[localLang]) u.voice = voiceCache[localLang];
           u.onend = onDone;
           u.onerror = onDone;
           speechSynthesis.speak(u);
@@ -1064,9 +1137,12 @@
       el.btnVerify.querySelector('.verify-label').textContent = '驗證中…';
       el.verifyResult.textContent = '';
       el.verifyResult.className = 'verify-result';
+      const verifyAc = new AbortController();
+      const verifyTimeout = setTimeout(() => verifyAc.abort(), 15000);
       try {
         const res = await fetch('https://api.openai.com/v1/models', {
           headers: { 'Authorization': `Bearer ${state.apiKey}` },
+          signal: verifyAc.signal,
         });
         if (res.ok) {
           el.verifyResult.textContent = '✓ 連線成功';
@@ -1078,19 +1154,32 @@
           el.verifyResult.textContent = '✗ ' + msg;
           el.verifyResult.className = 'verify-result fail';
         }
-      } catch {
-        el.verifyResult.textContent = '✗ 網路連線失敗';
+      } catch (e) {
+        const msg = isAbortError(e) ? '驗證逾時，請檢查網路後再試' : '網路連線失敗';
+        el.verifyResult.textContent = '✗ ' + msg;
         el.verifyResult.className = 'verify-result fail';
       } finally {
+        clearTimeout(verifyTimeout);
         el.btnVerify.classList.remove('verifying');
         el.btnVerify.querySelector('.verify-label').textContent = '驗證連線';
       }
     });
 
     // ========== TTS ==========
+    const voiceCache = {};
+    function updateVoiceCache() {
+      if (!('speechSynthesis' in window)) return;
+      const voices = speechSynthesis.getVoices();
+      for (const locale of ['zh-TW', 'ja-JP']) {
+        voiceCache[locale] = voices.find(v => v.lang === locale && v.name.includes('Google'))
+          || voices.find(v => v.lang === locale)
+          || voices.find(v => v.lang.startsWith(locale.split('-')[0]))
+          || null;
+      }
+    }
     if ('speechSynthesis' in window) {
-      speechSynthesis.getVoices();
-      speechSynthesis.addEventListener('voiceschanged', () => speechSynthesis.getVoices());
+      updateVoiceCache();
+      speechSynthesis.addEventListener('voiceschanged', updateVoiceCache);
     }
 
     async function speak(text, lang) {
@@ -1103,7 +1192,7 @@
       state.speaking = true;
 
       // Determine which display to glow
-      const display = lang === 'zh-TW' ? el.displayJp : el.displayTw; // translation result panel
+      const display = getDisplayForLang(lang);
       display.classList.add('speaking-glow');
 
       const onDone = () => {
@@ -1112,6 +1201,8 @@
         display.classList.remove('speaking-glow');
         state.speaking = false;
         state.audioEl = null;
+        state.ttsController = null;
+        clearAudioObjectUrl();
         state.lastTtsEndedAt = Date.now();
       };
 
@@ -1126,11 +1217,7 @@
           speechSynthesis.cancel();
           const u = new SpeechSynthesisUtterance(text);
           u.lang = localLang;
-          const voices = speechSynthesis.getVoices();
-          const best = voices.find(v => v.lang === localLang && v.name.includes('Google'))
-                    || voices.find(v => v.lang === localLang)
-                    || voices.find(v => v.lang.startsWith(localLang.split('-')[0]));
-          if (best) u.voice = best;
+          if (voiceCache[localLang]) u.voice = voiceCache[localLang];
           u.onend = onDone;
           u.onerror = onDone;
           speechSynthesis.speak(u);
@@ -1153,10 +1240,7 @@
           });
           if (res.ok) {
             const buf = await res.arrayBuffer();
-            const bytes = new Uint8Array(buf);
-            const chunks = [];
-            for (let i = 0; i < bytes.length; i += 8192) chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
-            const audio = new Audio(`data:audio/mp3;base64,${btoa(chunks.join(''))}`);
+            const audio = createAudioFromBuffer(buf);
             state.audioEl = audio;
             audio.onended = onDone;
             audio.onerror = onDone;
@@ -1173,17 +1257,19 @@
     }
 
     function stopSpeaking() {
+      const hadTtsActivity = state.speaking || !!state.audioEl || ('speechSynthesis' in window && speechSynthesis.speaking);
       if (state.ttsTimeout) { clearTimeout(state.ttsTimeout); state.ttsTimeout = null; }
       if (state.ttsController) { state.ttsController.abort(); state.ttsController = null; }
       if (state.audioEl) {
         state.audioEl.onended = null; state.audioEl.onerror = null;
         state.audioEl.pause(); state.audioEl.currentTime = 0; state.audioEl = null;
       }
+      clearAudioObjectUrl();
       if ('speechSynthesis' in window) speechSynthesis.cancel();
       el.displayTw.classList.remove('speaking-glow');
       el.displayJp.classList.remove('speaking-glow');
       state.speaking = false;
-      state.lastTtsEndedAt = Date.now();
+      if (hadTtsActivity) state.lastTtsEndedAt = Date.now();
       setPlayBtnsReady();
     }
 
@@ -1249,38 +1335,50 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       const decoder = new TextDecoder('utf-8');
       let buffer = '', result = '';
 
-      while (true) {
-        if (signal.aborted) break;
-        const { value, done } = await Promise.race([
-          reader.read(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('Stream timeout')), CONFIG.STREAM_READ_TIMEOUT_MS)),
-        ]);
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+      try {
         while (true) {
-          const nl = buffer.indexOf('\n');
-          if (nl < 0) break;
-          const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+          if (signal.aborted) throw makeAbortError();
+          const { value, done } = await readStreamChunk(reader, CONFIG.STREAM_READ_TIMEOUT_MS);
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          while (true) {
+            const nl = buffer.indexOf('\n');
+            if (nl < 0) break;
+            const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const data = trimmed.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const delta = JSON.parse(data)?.choices?.[0]?.delta?.content || '';
+              if (delta) result += delta;
+            } catch {}
+          }
+        }
+        if (signal.aborted) throw makeAbortError();
+        // Flush residual
+        buffer += decoder.decode();
+        for (const line of buffer.split('\n')) {
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:')) continue;
           const data = trimmed.slice(5).trim();
           if (!data || data === '[DONE]') continue;
-          try {
-            const delta = JSON.parse(data)?.choices?.[0]?.delta?.content || '';
-            if (delta) result += delta;
-          } catch {}
+          try { result += JSON.parse(data)?.choices?.[0]?.delta?.content || ''; } catch {}
         }
+        if (signal.aborted) throw makeAbortError();
+        return result.trim();
+      } catch (e) {
+        if (signal.aborted || isAbortError(e)) {
+          try { await reader.cancel(); } catch {}
+          throw makeAbortError();
+        }
+        if (e?.message === 'Stream timeout') {
+          try { await reader.cancel(); } catch {}
+        }
+        throw e;
+      } finally {
+        try { reader.releaseLock(); } catch {}
       }
-      // Flush residual
-      buffer += decoder.decode();
-      for (const line of buffer.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        try { result += JSON.parse(data)?.choices?.[0]?.delta?.content || ''; } catch {}
-      }
-      return result.trim();
     }
 
     async function refineTranslation(source, draft, srcLang, tgtLang, signal) {
@@ -1333,18 +1431,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       // Hide placeholders
       el.placeholderJp.style.display = 'none';
       el.placeholderTw.style.display = 'none';
-
-      if (speaker === 'TW') {
-        // TW spoke Chinese → TW zone: Chinese large only
-        el.translatedTw.textContent = text;
-        // JP zone: loading Japanese translation
-        el.translatedJp.textContent = '';
-      } else {
-        // JP spoke Japanese → JP zone: Japanese large only
-        el.translatedJp.textContent = text;
-        // TW zone: loading Chinese translation
-        el.translatedTw.textContent = '';
-      }
+      syncConversationPanels(speaker, text, '');
 
       listenerDisplayEl.classList.add('loading');
       statusEl.textContent = '翻譯中…';
@@ -1356,29 +1443,22 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       try {
         // Step 1: Translate
         let translated = await translateText(text, srcLang, tgtLang, controller.signal);
+        if (controller.signal.aborted || state.controller !== controller) throw makeAbortError();
         listenerDisplayEl.classList.remove('loading');
-
-        if (speaker === 'TW') {
-          el.translatedJp.textContent = translated;
-        } else {
-          el.translatedTw.textContent = translated;
-        }
+        syncConversationPanels(speaker, text, translated);
 
         // Step 2: Refine
         statusEl.textContent = '✦ 潤稿中…';
         try {
           const refined = await refineTranslation(text, translated, srcLang, tgtLang, controller.signal);
-          if (!controller.signal.aborted && refined && refined !== translated) {
+          if (!controller.signal.aborted && state.controller === controller && refined && refined !== translated) {
             translated = refined;
-            if (speaker === 'TW') {
-              el.translatedJp.textContent = translated;
-            } else {
-              el.translatedTw.textContent = translated;
-            }
+            syncConversationPanels(speaker, text, translated);
           }
         } catch (e) {
           if (!isAbortError(e)) console.warn('Refine failed:', e);
         }
+        if (controller.signal.aborted || state.controller !== controller) throw makeAbortError();
         statusEl.textContent = '';
 
         // Add to log
@@ -1414,22 +1494,36 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         toastError(String(e?.message || e));
       } finally {
         if (state.controller === controller) {
+          clearTranslationUi();
           state.busy = false;
           state.controller = null;
+          setEditable(!activeRecognition);
         }
-        // Re-enable editing after translation completes
-        setEditable(true);
       }
     }
 
     function abortInFlight() {
       if (state.controller) { try { state.controller.abort(); } catch {} state.controller = null; }
+      clearTranslationUi();
       state.busy = false;
+      if (!activeRecognition) setEditable(true);
     }
 
     // ========== Conversation Log ==========
     function addLogEntry(speaker, original, translated) {
+      abortSummary();
+      state.summaryRequestId += 1;
       state.log.push({ speaker, original, translated, time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) });
+      // Trim oldest entries if over limit
+      while (state.log.length > CONFIG.MAX_LOG_ENTRIES) {
+        state.log.shift();
+        const oldest = el.logList.querySelector('.log-entry');
+        if (oldest) oldest.remove();
+      }
+      el.summaryContent.textContent = '';
+      $('summarySection').style.display = 'none';
+      el.btnGenSummary.disabled = false;
+      el.btnGenSummary.textContent = '📋 產生摘要';
       renderLog();
     }
 
@@ -1445,7 +1539,16 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       const entry = state.log[state.log.length - 1];
       const div = document.createElement('div');
       div.className = 'log-entry';
-      div.innerHTML = `<div class="log-speaker ${entry.speaker.toLowerCase()}">${entry.speaker} ${entry.time}</div><div class="log-original">${escHtml(entry.original)}</div><div class="log-translated">→ ${escHtml(entry.translated)}</div>`;
+      const spk = document.createElement('div');
+      spk.className = 'log-speaker ' + entry.speaker.toLowerCase();
+      spk.textContent = entry.speaker + ' ' + entry.time;
+      const orig = document.createElement('div');
+      orig.className = 'log-original';
+      orig.textContent = entry.original;
+      const trans = document.createElement('div');
+      trans.className = 'log-translated';
+      trans.textContent = '\u2192 ' + entry.translated;
+      div.append(spk, orig, trans);
       el.logList.appendChild(div);
 
       // Auto scroll log body if overlay is open
@@ -1455,7 +1558,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       }
     }
 
-    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
     // ========== Editable Text ==========
     function setEditable(enabled) {
@@ -1500,8 +1603,10 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         toast('請先輸入文字');
         return;
       }
-      // Lock editing and run translation
-      setEditable(false);
+      if (!state.apiKey) {
+        toastError('請先點右上角 ⚙ 輸入 API Key');
+        return;
+      }
       handleUtterance(speaker, text);
     }
 
@@ -1569,6 +1674,10 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
 
     function startMic(speaker) {
       if (!SpeechRecognition) return;
+      if (state.busy) {
+        toast('上一句仍在翻譯中，請稍候');
+        return;
+      }
       stopSpeaking();
       abortInFlight();
 
@@ -1597,8 +1706,11 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       recognition.maxAlternatives = 1;
 
       let finalTranscript = '';
+      let lastInterim = '';
       let micGotEvent = false;
       let micSafetyTimer = null;
+      let micMaxTimer = null;
+      let clearedTranscript = false;
 
       const btn = speaker === 'TW' ? el.btnMicTw : el.btnMicJp;
       const otherBtn = speaker === 'TW' ? el.btnMicJp : el.btnMicTw;
@@ -1613,40 +1725,47 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         otherBtn.classList.remove('recording', 'mic-pending');
         btn.textContent = '⏹ 停止';
         display.classList.add('recording-active');
-        // Clear previous content for this speaker
-        placeholderEl.style.display = 'none';
-        translatedEl.textContent = '';
         // Hide play buttons during recording
         el.btnPlayTw.style.display = 'none';
         el.btnPlayJp.style.display = 'none';
       }
 
+      function clearMicTimers() {
+        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+      }
+
       recognition.onstart = () => {
         micGotEvent = true;
-        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+        clearMicTimers();
         showRecordingUI();
       };
       recognition.onaudiostart = () => {
         micGotEvent = true;
-        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+        clearMicTimers();
         showRecordingUI();
       };
 
       recognition.onresult = (event) => {
         micGotEvent = true;
-        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+        clearMicTimers();
+        if (!clearedTranscript) {
+          placeholderEl.style.display = 'none';
+          translatedEl.textContent = '';
+          clearedTranscript = true;
+        }
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const t = event.results[i][0].transcript;
           if (event.results[i].isFinal) finalTranscript += t;
           else interim += t;
         }
+        lastInterim = interim;
         translatedEl.textContent = finalTranscript + interim;
       };
 
       recognition.onerror = (event) => {
         micGotEvent = true;
-        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+        clearMicTimers();
         if (event.error === 'aborted') return;
         if (event.error === 'no-speech') toast('沒有偵測到語音，請再試一次');
         else if (event.error === 'not-allowed') toastError('請允許麥克風權限');
@@ -1656,10 +1775,11 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       };
 
       recognition.onend = () => {
-        if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+        clearMicTimers();
+        if (micMaxTimer) { clearTimeout(micMaxTimer); micMaxTimer = null; }
         if (activeRecognition !== recognition) return;
         stopMic();
-        const text = (finalTranscript || '').trim();
+        const text = (finalTranscript || lastInterim || '').trim();
         if (text) handleUtterance(speaker, text);
       };
 
@@ -1671,6 +1791,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       } catch (e) {
         activeRecognition = null;
         activeMicSpeaker = null;
+        if (!state.busy) setEditable(true);
         toastError('無法啟動語音辨識：' + (e.message || e));
         return;
       }
@@ -1682,6 +1803,13 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
         }
       }, 5000);
 
+      micMaxTimer = setTimeout(() => {
+        if (activeRecognition === recognition) {
+          toast('已達最大錄音時間，自動停止');
+          try { recognition.stop(); } catch {}
+        }
+      }, CONFIG.MAX_RECORDING_MS);
+
       btn.classList.add('mic-pending');
       btn.textContent = '⏳ 等待中…';
     }
@@ -1691,7 +1819,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       if (activeRecognition) {
         const rec = activeRecognition;
         activeRecognition = null;
-        rec.onresult = rec.onerror = rec.onend = null;
+        rec.onstart = rec.onaudiostart = rec.onresult = rec.onerror = rec.onend = null;
         try { rec.stop(); } catch {}
       }
       el.btnMicTw.classList.remove('recording', 'mic-pending');
@@ -1702,6 +1830,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.displayJp.classList.remove('recording-active');
       activeMicSpeaker = null;
       state.lastMicEndedAt = Date.now();
+      if (!state.busy) setEditable(true);
     }
 
     // ========== Clear All ==========
@@ -1709,6 +1838,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       stopSpeaking();
       stopMic();
       abortInFlight();
+      abortSummary();
+      state.summaryRequestId += 1;
       state.log = [];
       el.logList.querySelectorAll('.log-entry').forEach(e => e.remove());
       el.logEmpty.style.display = '';
@@ -1724,6 +1855,8 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
       el.btnPlayTw.style.display = 'none';
       el.btnPlayJp.style.display = 'none';
       el.summaryContent.textContent = '';
+      el.btnGenSummary.disabled = false;
+      el.btnGenSummary.textContent = '📋 產生摘要';
       $('summarySection').style.display = 'none';
       exitEditMode('TW');
       exitEditMode('JP');
@@ -1750,6 +1883,14 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
     el.btnGenSummary.addEventListener('click', async () => {
       if (state.log.length === 0) { toast('尚無對話紀錄可摘要'); return; }
       if (!state.apiKey) { toastError('請先設定 API Key'); return; }
+
+      abortSummary();
+      const requestId = ++state.summaryRequestId;
+      const summaryController = new AbortController();
+      state.summaryController = summaryController;
+      const summaryTimeout = setTimeout(() => {
+        try { summaryController.abort(); } catch {}
+      }, CONFIG.SUMMARY_TIMEOUT_MS);
 
       el.btnGenSummary.disabled = true;
       el.btnGenSummary.textContent = '分析中…';
@@ -1796,6 +1937,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
             body: JSON.stringify(makeBody(model)),
+            signal: summaryController.signal,
           });
           if (!res.ok) {
             const t = await safeReadText(res);
@@ -1806,16 +1948,24 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
           result = (json?.choices?.[0]?.message?.content || '').trim();
           break;
         }
+        if (summaryController.signal.aborted || state.summaryController !== summaryController || state.summaryRequestId !== requestId) {
+          throw makeAbortError();
+        }
         el.summaryContent.textContent = result || '（無法產生摘要）';
         $('summarySection').style.display = '';
         // Scroll to summary
         const logBody = $('logBody');
         if (logBody) logBody.scrollTop = logBody.scrollHeight;
       } catch (e) {
+        if (isAbortError(e)) return;
         toastError('摘要產生失敗：' + (e?.message || e));
       } finally {
-        el.btnGenSummary.disabled = false;
-        el.btnGenSummary.textContent = '📋 產生摘要';
+        clearTimeout(summaryTimeout);
+        if (state.summaryController === summaryController) {
+          state.summaryController = null;
+          el.btnGenSummary.disabled = false;
+          el.btnGenSummary.textContent = '📋 產生摘要';
+        }
       }
     });
 
@@ -1832,6 +1982,7 @@ Your task: revise a machine-translated draft to reach native-speaker quality.
     window.addEventListener('beforeunload', () => {
       stopMic();
       if (state.controller) try { state.controller.abort(); } catch {}
+      abortSummary();
       if (state.ttsController) try { state.ttsController.abort(); } catch {}
       if (state.audioEl) try { state.audioEl.pause(); } catch {}
       if ('speechSynthesis' in window) speechSynthesis.cancel();
